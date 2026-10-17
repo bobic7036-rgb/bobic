@@ -1,134 +1,163 @@
-"""Кнопки та обробники підписок / оплат."""
-import asyncio
+"""Підписки та оплата Telegram Stars (зірками).
+
+Для адміністратора (ADMIN_ID) ВСЕ безкоштовно: підписка видається
+автоматично без оплати. Для всіх інших — реальна оплата зірками через
+send_invoice (валюта XTR) + pre_checkout_query + successful_payment.
+"""
+import time
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    LabeledPrice, SuccessfulPayment,
+)
 from aiogram.filters import Command, CommandStart
 from bot import db
-from bot.config import ADMIN_ID
+from bot.config import ADMIN_ID, STAR
 
 router = Router()
 
-# pending invoice: invoice_id -> {user_id, plan}
-_invoices = {}
-_invoice_seq = 0
+PLAN_NAMES = {"base": "БАЗОВА", "pro": "ПРОФЕСІЙНА"}
 
 
-def make_invoice_id():
-    global _invoice_seq
-    _invoice_seq += 1
-    return f"INV-{int(asyncio.get_event_loop().time())}-{_invoice_seq}"
+def is_admin(user_id: int) -> bool:
+    return user_id == ADMIN_ID
 
 
 async def subscription_kb(user_id: int):
-    u = await db.get_user(user_id)
-    base_price = await db.get_int("base_price")
-    pro_price = await db.get_int("pro_price")
+    if is_admin(user_id):
+        btn = InlineKeyboardButton(
+            text="👑 Адмін — доступ безкоштовний (активний)", callback_data="adm_free")
+        return InlineKeyboardMarkup(inline_keyboard=[[btn]])
+    base_stars = await db.get_int("stars_base")
+    pro_stars = await db.get_int("stars_pro")
     base_days = await db.get_int("base_days")
     pro_days = await db.get_int("pro_days")
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(InlineKeyboardButton(
-        f"📦 БАЗОВА — {base_price}$ / {base_days} дн.",
-        callback_data=f"buy:base"))
-    kb.add(InlineKeyboardButton(
-        f"💎 ПРОФЕСІЙНА — {pro_price}$ / {pro_days} дн.",
-        callback_data=f"buy:pro"))
-    return kb
+    rows = [
+        [InlineKeyboardButton(text=f"📦 БАЗОВА — ⭐ {base_stars} / {base_days} дн.",
+                              callback_data="buy:base")],
+        [InlineKeyboardButton(text=f"💎 ПРОФЕСІЙНА — ⭐ {pro_stars} / {pro_days} дн.",
+                              callback_data="buy:pro")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "adm_free")
+async def cb_adm_free(cb: CallbackQuery):
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Тільки для адміна 😉", show_alert=True)
+        return
+    await cb.answer("👑 Тобі все безкоштовно!")
 
 
 @router.message(Command("subscribe"))
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    await db.ensure_user(message.from_user.id, message.from_user.username or "")
-    u = await db.get_user(message.from_user.id)
-    now = int(asyncio.get_event_loop().time())
+    uid = message.from_user.id
+    await db.ensure_user(uid, message.from_user.username or "")
+    # 👑 адміну — авто-підписка назавжди при кожному /start
+    if is_admin(uid):
+        for p in ("base", "pro"):
+            await db.set_subscription(uid, p, 36500)  # ~100 років
+    u = await db.get_user(uid)
+    now = time.time()
 
     def until(ts):
-        d = (ts - now) // 86400
-        return f"ще {d} дн." if d > 0 else "❌ немає"
+        if is_admin(uid):
+            return "♾️ безкоштовно (адмін)"
+        d = (ts - now) // 86400 if ts else -1
+        return f"ще {int(d)} дн." if d >= 0 else "❌ немає"
 
     text = (
         "🤖 <b>Crypto Signals Bot</b>\n"
         "Готові зделки з Binance Futures: вхід, стоп, 2 тейки, шанс і пояснення.\n\n"
         f"📦 Базова підписка: {until(u['base_until'])}\n"
         f"💎 Професійна підписка: {until(u['pro_until'])}\n\n"
-        "Обери підписку 👇 або напиши /help"
+        + ("👑 Ти адмін — усі функції БЕЗКОШТОВНО та назавжди.\n"
+           if is_admin(uid) else
+           "Оплата зірками (⭐ Telegram Stars) — миттєво і безпечно.\n"
+           "Обери підписку 👇 або напиши /help")
     )
-    await message.answer(text, parse_mode="HTML", reply_markup=await subscription_kb(message.from_user.id))
+    await message.answer(text, parse_mode="HTML", reply_markup=await subscription_kb(uid))
 
 
 @router.callback_query(F.data.startswith("buy:"))
 async def cb_buy(cb: CallbackQuery):
     plan = cb.data.split(":")[1]
-    price = await db.get_int(f"{plan}_price")
+    if plan not in PLAN_NAMES:
+        await cb.answer()
+        return
+
+    # 👑 АДМІН — все безкоштовно, активація без оплати
+    if is_admin(cb.from_user.id):
+        await db.set_subscription(cb.from_user.id, plan, 36500)
+        name = PLAN_NAMES[plan]
+        await cb.message.answer(
+            f"👑 <b>{name}</b> підписка активована БЕЗКОШТОВНО (ти адмін). ♾️",
+            parse_mode="HTML",
+        )
+        await cb.answer("Безкоштовно для адміна 👑")
+        return
+
+    stars = max(await db.get_int(f"stars_{plan}"), 1)   # кількість зірок
     days = await db.get_int(f"{plan}_days")
-    inv_id = make_invoice_id()
-    _invoices[inv_id] = {"user_id": cb.from_user.id, "plan": plan}
+    amount = stars * STAR                                # у тонах (1 star = 10^6 tons)
+    title = f"Підписка {PLAN_NAMES[plan]} ({days} днів)"
+    payload = f"sub:{plan}:{cb.from_user.id}"
 
-    name = "БАЗОВА" if plan == "base" else "ПРОФЕСІЙНА"
-    pay_text = (
-        f"🧾 <b>Рахунок на оплату</b>\n\n"
-        f"Підписка: <b>{name}</b> на {days} днів\n"
-        f"Сума до оплати: <b>{price} USDT (TRC20)</b>\n"
-        f"Номер рахунку: <code>{inv_id}</code>\n\n"
-        f"⚠️ Оплати за реквізитами, які надішле адміністратор у особистих повідомленнях, "
-        f"та натисни кнопку нижче. Адмін підтвердить оплату і відкриє доступ."
-    )
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(InlineKeyboardButton("✅ Я оплатив — підтвердити", callback_data=f"paid:{inv_id}"))
-    await cb.message.answer(pay_text, parse_mode="HTML", reply_markup=kb)
-
-    # сповіщення адміну
-    admin_kb = InlineKeyboardMarkup(row_width=2)
-    admin_kb.insert(InlineKeyboardButton("✔️ Підтвердити", callback_data=f"acc_yes:{inv_id}"))
-    admin_kb.insert(InlineKeyboardButton("✖️ Відхилити", callback_data=f"acc_no:{inv_id}"))
     try:
-        await cb.bot.send_message(
+        await cb.bot.send_invoice(
+            chat_id=cb.from_user.id,
+            currency="XTR",
+            prices=[LabeledPrice(label=title, amount=amount)],
+            title=title,
+            description=f"Доступ до сигналів. Оплата ⭐ Telegram Stars.",
+            payload=payload,
+            provider_payload=payload,
+        )
+    except Exception as e:
+        await cb.message.answer(f"⚠️ Не вдалося створити рахунок: {e}")
+    await cb.answer()
+
+
+# ------------------- ЕТАПИ ОПЛАТИ ЗІРКАМИ -------------------
+
+@router.pre_checkout_query()
+async def process_pre_checkout(pc):
+    # Валідація: валюта XTR (зірки) та мінімальна сума (50 тон)
+    ok = pc.currency == "XTR" and pc.total_amount >= 50
+    if ok:
+        await pc.answer(success=True)
+    else:
+        await pc.answer(success=False, error_message="⚠️ Невірні параметри оплати.")
+
+
+@router.message(F.successful_payment)
+async def process_successful_payment(message: Message):
+    pay: SuccessfulPayment = message.successful_payment
+    try:
+        _, plan, uid_s = pay.invoice_payload.split(":")
+        uid = int(uid_s)
+    except (ValueError, AttributeError):
+        return
+    if plan not in PLAN_NAMES:
+        return
+    days = await db.get_int(f"{plan}_days")
+    await db.set_subscription(uid, plan, days)
+    stars = max(pay.total_amount // STAR, 1)
+    name = PLAN_NAMES[plan]
+    await message.bot.send_message(
+        uid,
+        f"🎉 <b>Оплата зірками пройшла успішно!</b>\n"
+        f"Активовано <b>{name}</b> підписку на {days} днів (⭐ {stars}).\n\n"
+        f"/signals — отримати актуальні зделки просто зараз.",
+        parse_mode="HTML",
+    )
+    # сповіщення адміну про продаж
+    try:
+        await message.bot.send_message(
             ADMIN_ID,
-            f"💰 Нова оплата!\nUser: @{cb.from_user.username or ''} (id {cb.from_user.id})\n"
-            f"План: {name}, {price} USDT, рахунок {inv_id}",
-            reply_markup=admin_kb,
+            f"💰 Продаж! @{message.from_user.username or ''} (id {message.from_user.id})\n"
+            f"План: {name} — ⭐ {stars} за {days} днів",
         )
     except Exception:
         pass
-    await cb.answer()
-
-
-@router.callback_query(F.data.startswith("paid:"))
-async def cb_paid(cb: CallbackQuery):
-    await cb.answer("⏳ Очікуй підтвердження від адміністратора...", show_alert=True)
-
-
-@router.callback_query(F.data.startswith("acc_yes:"))
-async def cb_accept(cb: CallbackQuery):
-    inv_id = cb.data.split(":")[1]
-    info = _invoices.pop(inv_id, None)
-    if not info:
-        await cb.answer("Рахунок не знайдено (можливо вже оброблено)", show_alert=True)
-        return
-    plan = info["plan"]
-    days = await db.get_int(f"{plan}_days")
-    await db.set_subscription(info["user_id"], plan, days)
-    name = "БАЗОВУ" if plan == "base" else "ПРОФЕСІЙНУ"
-    await cb.bot.send_message(
-        info["user_id"],
-        f"🎉 Оплата підтверджена! Активовано <b>{name}</b> підписку на {days} днів.\n"
-        f"Команда /signals — отримати актуальні зделки.",
-        parse_mode="HTML",
-    )
-    await cb.message.edit_reply_markup(reply_markup=None)
-    await cb.bot.send_message(cb.from_user.id, f"✅ Підписку активовано (рахунок {inv_id}).")
-    await cb.answer()
-
-
-@router.callback_query(F.data.startswith("acc_no:"))
-async def cb_reject(cb: CallbackQuery):
-    inv_id = cb.data.split(":")[1]
-    info = _invoices.pop(inv_id, None)
-    if info:
-        await cb.bot.send_message(
-            info["user_id"],
-            f"❌ Оплату по рахунку {inv_id} не підтверджено. "
-            f"Якщо ти все ж оплатив — напиши адміну.",
-        )
-    await cb.message.edit_reply_markup(reply_markup=None)
-    await cb.answer("Відхилено")

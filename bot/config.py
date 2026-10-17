@@ -8,13 +8,17 @@ DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "..", "bo
 
 BINANCE_FUTURES_URL = "https://fapi.binance.com"
 
+# Ціни підписок у Telegram Star (зірках). 1 Star = 1_000_000 "тон".
+# Адмін може змінити наживо: /settings starsbase 5 / starspro 12 (кількість зірок)
+STAR = 1_000_000
+
 # Default settings (admin can change them live via /settings — stored in DB)
 DEFAULTS = {
     "signals_interval_min": 30,   # як часто генерувати нові зделки
     "signals_count": 5,           # скільки зделок видавати за один прохід
     "min_score": 65,              # мінімальний "шанс" (%), щоб монета потрапила в сигнал
-    "base_price": 10,             # ціна базової підписки (USDT)
+    "stars_base": 3,              # ціна базової підписки (зірок)
     "base_days": 30,              # тривалість базової підписки (днів)
-    "pro_price": 25,              # ціна професійної підписки (USDT)
+    "stars_pro": 7,               # ціна професійної підписки (зірок)
     "pro_days": 30,               # тривалість професійної підписки (днів)
 }

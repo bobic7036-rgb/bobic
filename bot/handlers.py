@@ -11,13 +11,21 @@ from bot.scheduler import send_signals_round
 router = Router()
 
 
+def is_admin(user_id: int) -> bool:
+    return user_id == ADMIN_ID
+
+
 async def has_any(user_id: int) -> bool:
+    if is_admin(user_id):        # 👑 адміну все безкоштовно
+        return True
     u = await db.get_user(user_id)
     now = db.time.time()
     return (u["base_until"] or 0) > now or (u["pro_until"] or 0) > now
 
 
 async def is_pro(user_id: int) -> bool:
+    if is_admin(user_id):        # 👑 адміну все безкоштовно
+        return True
     u = await db.get_user(user_id)
     return (u["pro_until"] or 0) > db.time.time()
 
@@ -33,9 +41,10 @@ HELP_TEXT = """📖 <b>Довідка</b>
 • Два тейк-профіти
 • % шансу та пояснення «чому так піде»
 
-<b>Підписки:</b>
+<b>Підписки (оплата зірками ⭐ Telegram Stars):</b>
 📦 <b>БАЗОВА</b> — сигнали за розкладом (кожні N хв), бот сам повідомляє, чи спрацювала зделка: дійшла до ✅ ТЕЙКу або 🛑 СТОПУ.
 💎 <b>ПРОФЕСІЙНА</b> — все з базової + напиши команду /deposit (свій депозит у USDT), і бот підбере плече та розмір позиції під кожну зделку, а в кінці дня надішле звіт: скільки заробив від депозиту та PnL.
+Оплата — натисни кнопку в /start, Telegram сам спише зірки, підписка активується миттєво.
 
 <b>Команди:</b>
 /start — головне меню та купівля підписки
@@ -61,6 +70,8 @@ async def cmd_status(message: Message):
     now = db.time.time()
 
     def until(ts):
+        if message.from_user.id == ADMIN_ID:
+            return "♾️ безкоштовно (адмін)"
         d = ts and (ts - now) // 86400
         return f"✅ діє ще {d} дн." if d and d >= 1 else "❌ немає"
 
@@ -172,9 +183,9 @@ SETTINGS_MAP = {
     "interval": ("signals_interval_min", "інтервал зделок (хв)"),
     "count": ("signals_count", "кількість зделок за прохід"),
     "minscore": ("min_score", "мінімальний шанс (%)"),
-    "baseprice": ("base_price", "ціна БАЗОВОЇ ($/USDT)"),
+    "starsbase": ("stars_base", "ціна БАЗОВОЇ (зірок ⭐)"),
     "basedays": ("base_days", "тривалість БАЗОВОЇ (днів)"),
-    "proprice": ("pro_price", "ціна ПРО ($/USDT)"),
+    "starspro": ("stars_pro", "ціна ПРО (зірок ⭐)"),
     "prodays": ("pro_days", "тривалість ПРО (днів)"),
 }
 
@@ -203,8 +214,8 @@ async def cmd_settings(message: Message, command: CommandObject):
     lines.append("\n<b>Змінити:</b>\n<code>/settings interval 30</code> — кожні 30 хв давати зделки\n"
                  "<code>/settings count 5</code> — 5 зделок за прохід\n"
                  "<code>/settings minscore 70</code> — мінімальний шанс 70%\n"
-                 "<code>/settings baseprice 10</code> / <code>/settings basedays 30</code>\n"
-                 "<code>/settings proprice 25</code> / <code>/settings prodays 30</code>")
+                 "<code>/settings starsbase 3</code> / <code>/settings basedays 30</code> — ціна (⭐) і тривалість БАЗОВОЇ\n"
+                 "<code>/settings starspro 7</code> / <code>/settings prodays 30</code> — ціна (⭐) і тривалість ПРО")
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
